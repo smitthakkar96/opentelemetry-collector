@@ -1,4 +1,4 @@
-module go.opentelemetry.io/collector/exporter/otlphttpexporter
+module github.com/smitthakkar96/collector/exporter/otlphttpexporter
 
 go 1.22.0
 
