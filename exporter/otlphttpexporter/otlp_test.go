@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1150,4 +1151,27 @@ type badReader struct{}
 
 func (b badReader) Read([]byte) (int, error) {
 	return 0, errors.New("Bad read")
+}
+
+func Test_Shutdown(t *testing.T) {
+	be := &baseExporter{
+		wg:        new(sync.WaitGroup),
+		closeChan: make(chan struct{}),
+	}
+	wg := new(sync.WaitGroup)
+	err := be.Shutdown(context.Background())
+	require.NoError(t, err)
+	errChan := make(chan error, 5)
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errChan <- be.pushMetrics(context.Background(), pmetric.NewMetrics())
+		}()
+	}
+	wg.Wait()
+	close(errChan)
+	for ok := range errChan {
+		assert.Error(t, ok)
+	}
 }

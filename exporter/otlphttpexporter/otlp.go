@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"runtime"
 	"strconv"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -46,6 +47,8 @@ type baseExporter struct {
 	settings    component.TelemetrySettings
 	// Default user-agent header.
 	userAgent string
+	wg        *sync.WaitGroup
+	closeChan chan struct{}
 }
 
 const (
@@ -76,7 +79,19 @@ func newExporter(cfg component.Config, set exporter.Settings) (*baseExporter, er
 		logger:    set.Logger,
 		userAgent: userAgent,
 		settings:  set.TelemetrySettings,
+		wg:        new(sync.WaitGroup),
+		closeChan: make(chan struct{}),
 	}, nil
+}
+
+func (e *baseExporter) Shutdown(context.Context) error {
+	select {
+	case <-e.closeChan:
+	default:
+		close(e.closeChan)
+	}
+	e.wg.Wait()
+	return nil
 }
 
 // start actually creates the HTTP client. The client construction is deferred till this point as this
@@ -112,23 +127,32 @@ func (e *baseExporter) pushTraces(ctx context.Context, td ptrace.Traces) error {
 }
 
 func (e *baseExporter) pushMetrics(ctx context.Context, md pmetric.Metrics) error {
-	tr := pmetricotlp.NewExportRequestFromMetrics(md)
+	e.wg.Add(1)
+	defer e.wg.Done()
 
-	var err error
-	var request []byte
-	switch e.config.Encoding {
-	case EncodingJSON:
-		request, err = tr.MarshalJSON()
-	case EncodingProto:
-		request, err = tr.MarshalProto()
+	select {
+	case <-e.closeChan:
+		return errors.New("shutdown has been called")
 	default:
-		err = fmt.Errorf("invalid encoding: %s", e.config.Encoding)
-	}
+		tr := pmetricotlp.NewExportRequestFromMetrics(md)
 
-	if err != nil {
-		return consumererror.NewPermanent(err)
+		var err error
+		var request []byte
+		switch e.config.Encoding {
+		case EncodingJSON:
+			request, err = tr.MarshalJSON()
+		case EncodingProto:
+			request, err = tr.MarshalProto()
+		default:
+			err = fmt.Errorf("invalid encoding: %s", e.config.Encoding)
+		}
+
+		if err != nil {
+			return consumererror.NewPermanent(err)
+		}
+		return e.export(ctx, e.metricsURL, request, e.metricsPartialSuccessHandler)
+
 	}
-	return e.export(ctx, e.metricsURL, request, e.metricsPartialSuccessHandler)
 }
 
 func (e *baseExporter) pushLogs(ctx context.Context, ld plog.Logs) error {
